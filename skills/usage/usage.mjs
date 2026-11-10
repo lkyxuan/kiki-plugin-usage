@@ -2,7 +2,7 @@
 // 用量宝的脚本：交给 ccusage（MIT，github.com/ryoppippi/ccusage）读本机各编程 agent 的会话记录，算 token 和钱。
 // 它认识二十多个工具（Claude Code、Codex、OpenCode、Gemini CLI、Hermes、Grok、pi……），格式变了由它跟进。只用 Node 自带的东西。
 //
-//   node skills/usage/usage.mjs install          下载锁定版本的 ccusage 到 bin/（校验 sha512），打开后台读用量
+//   node skills/usage/usage.mjs install          下载锁定版本的 ccusage 到 bin/（校验 sha512），打开后台读用量（Kiki 自带这个宝时后台程序自己会下载，一般不用跑）
 //   node skills/usage/usage.mjs loop             后台程序（run.sh 调）：每分钟读今天、每 30 分钟读 30 天，写卡片，报最后活动时间
 //   node skills/usage/usage.mjs once             马上读一次 30 天
 //   node skills/usage/usage.mjs report [天数]     过去几天（默认 7，最多 30）按工具合计，给人看的一段话
@@ -160,10 +160,20 @@ export function merge(state, r, quick) {
   return s;
 }
 
+/** 给 Kiki 设置「用量」页看的：今天、7 天、30 天合计，7 天按工具（名字已换成给人看的） */
+export function summaryFor(state, now = new Date()) {
+  const sum = (days) => {
+    const t = totals(state, days, now);
+    return { tokens: t.tokens, cost: t.cost, rows: t.rows.map((r) => ({ agent: r.agent, name: agentName(r.agent), tokens: r.tokens, cost: r.cost })) };
+  };
+  return { version: CCUSAGE_VERSION, updated: state.updated ?? null, error: state.error ?? null, hidden: (state.hidden ?? []).map(agentName), today: sum(1), week: sum(7), month: sum(30) };
+}
+
 const load = () => ({ days: [], sessions: [], hidden: [], ...readJson(p("usage.json"), {}) });
 function save(state) {
   writeAtomic(p("usage.json"), JSON.stringify(state) + "\n");
   writeAtomic(p("card.json"), JSON.stringify({ ...cardFor(state), at: new Date().toISOString() }) + "\n");
+  writeAtomic(p("summary.json"), JSON.stringify(summaryFor(state)) + "\n");
 }
 
 /** 跑一次 ccusage：quick 只读今天，否则 30 天 */
@@ -200,7 +210,9 @@ async function service(action) {
   } catch {} // Kiki 每 30 秒也会自己看一眼
 }
 
-async function install() {
+/** 下载锁定版本的 ccusage 到 bin/ccusage（校验 sha512），已经有就不下 */
+async function ensureBin() {
+  if (existsSync(BIN())) return;
   const plat = `${process.platform}-${process.arch}`;
   const want = CCUSAGE_SHA512[plat];
   if (!want) throw new Error(`这个平台（${plat}）没有 ccusage`);
@@ -221,17 +233,37 @@ async function install() {
   chmodSync(exe, 0o755);
   renameSync(exe, join(BAO, "bin", "ccusage"));
   rmSync(tmp, { recursive: true, force: true });
-  chmodSync(join(HERE, "run.sh"), 0o755); // .bao 导入不带执行权限；有了执行权限 Kiki 才会开后台程序
-  await refresh();
-  await service("start");
-  console.log(`装好了：ccusage ${CCUSAGE_VERSION}（${plat}），后台每分钟读一次。\n\n${reportText(load())}`);
 }
 
-/** 后台程序：每分钟读今天，每 30 分钟读 30 天 */
-async function loop() {
+async function install() {
+  await ensureBin();
+  try {
+    chmodSync(join(HERE, "run.sh"), 0o755); // .bao 导入不带执行权限；有了执行权限 Kiki 才会开后台程序
+  } catch {}
   await refresh();
+  await service("start");
+  console.log(`装好了：ccusage ${CCUSAGE_VERSION}，后台每分钟读一次。\n\n${reportText(load())}`);
+}
+
+/** 后台程序：没有 ccusage 先下载（Kiki 自带这个宝，装好就开），然后每分钟读今天，每 30 分钟读 30 天 */
+async function loop() {
   let n = 0;
-  setInterval(() => void refresh(++n % 30 !== 0), 60_000);
+  const tick = async () => {
+    if (!existsSync(BIN())) {
+      try {
+        await ensureBin();
+      } catch (e) {
+        const state = load();
+        state.error = `下载 ccusage 失败：${String(e?.message ?? e).slice(0, 100)}，过一分钟再试`;
+        save(state);
+        return;
+      }
+      return refresh();
+    }
+    return refresh(n++ % 30 !== 0);
+  };
+  await tick();
+  setInterval(() => void tick(), 60_000);
 }
 
 function setHidden(agent, hide) {
