@@ -1,0 +1,8 @@
+{
+  "kiki": "plugin",
+  "name": "用量",
+  "version": "0.1.0",
+  "needs": { "network": false },
+  "card": true,
+  "services": [{ "name": "usage", "cmd": "skills/usage/run.sh", "restart": true }]
+}
